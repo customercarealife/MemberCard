@@ -154,9 +154,12 @@ def send_email_with_attachment(to_email, subject, body_text, attachment_path=Non
 
     try:
         with smtplib.SMTP(smtp_server, smtp_port, timeout=10) as server:
-            server.starttls()
+            server.ehlo()              # Identify to the server
+            server.starttls()          # Start TLS
+            server.ehlo()              # Re-identify after TLS
             server.login(smtp_user, smtp_password)
             server.send_message(msg)
+
             logging.info(f"Email sent to {to_email}")
     except Exception as e:
         logging.error(f"SMTP send failed: {e}")
