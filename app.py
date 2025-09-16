@@ -35,11 +35,11 @@ FONT_SIZE_DATE = 22
 FONT_SIZE_NAME = 25
 FONT_SIZE_LABEL = 18
 
-# Ensure necessary folders exist
+# Ensure folders exist
 for folder in (UPLOAD_FOLDER, OUTPUT_FOLDER, 'static'):
     os.makedirs(folder, exist_ok=True)
 
-# Create sample XLSX file if it doesn't exist
+# Create sample XLSX file if missing
 if not os.path.exists(SAMPLE_XLSX_PATH):
     df_sample = pd.DataFrame({
         "Name": ["John Doe", "Jane Smith"],
@@ -52,24 +52,23 @@ if not os.path.exists(SAMPLE_XLSX_PATH):
 
 
 def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() == 'xlsx'
+    return '.' in filename and filename.lower().endswith('.xlsx')
 
 
 def load_font(path, size):
     try:
         return ImageFont.truetype(path, int(size))
     except IOError:
+        logging.warning(f"Font {path} not found, using default")
         return ImageFont.load_default()
 
 
 def sanitize_filename(name):
-    name = name.replace(' ', '_')
-    return re.sub(r'[\\/*?:"<>|\n]', '', name)[:100]
+    return re.sub(r'[\\/*?:"<>|\n ]', '_', str(name))[:100]
 
 
 def format_card_id(card_id):
     cleaned = ''.join(c for c in str(card_id) if c.isalnum())
-
     if cleaned.startswith("AL001") or cleaned.startswith("STE"):
         prefix = "AL001"
         if cleaned.startswith("AL001"):
@@ -78,12 +77,9 @@ def format_card_id(card_id):
         else:
             category = cleaned[:3]
             digits = ''.join(c for c in cleaned[3:] if c.isdigit())
-
         numbers = digits[:7].ljust(7, '0')
         suffix = digits[7:11].ljust(4, '0')
-
         return f"{prefix}/{category}-{numbers}/{suffix}"
-
     else:
         chars = cleaned[:3].ljust(3, 'X')
         digits = ''.join(c for c in cleaned if c.isdigit())
@@ -92,14 +88,18 @@ def format_card_id(card_id):
 
 
 def send_email_with_attachment(to_email, subject, body_text, attachment_path=None):
-    smtp_server = os.environ.get('SMTP_SERVER')
-    smtp_port = int(os.environ.get('SMTP_PORT', 587))
-    smtp_user = os.environ.get('SMTP_USER')
-    smtp_password = os.environ.get('SMTP_PASSWORD')
+    smtp_server = os.getenv('SMTP_SERVER')
+    smtp_port = int(os.getenv('SMTP_PORT', 587))
+    smtp_user = os.getenv('SMTP_USER')
+    smtp_password = os.getenv('SMTP_PASSWORD')
+
+    if not smtp_server or not smtp_user or not smtp_password:
+        logging.error("SMTP credentials missing. Email not sent.")
+        return
 
     image_url = "https://i.imghippo.com/files/shL3300Ww.jpg"
-
-    contact_info = """<div style='text-align:left;'><br>
+    contact_info = """
+       <div style='text-align:left;'><br>
            Warm Regards,<br>
            Customer Care & Complaints Management<br>
            Operation Department<br><br>
@@ -118,8 +118,7 @@ def send_email_with_attachment(to_email, subject, body_text, attachment_path=Non
                <p>{body_text}</p>
                {contact_info}
            </body>
-       </html>
-       """
+       </html>"""
 
     msg = EmailMessage()
     msg['Subject'] = subject
@@ -128,36 +127,25 @@ def send_email_with_attachment(to_email, subject, body_text, attachment_path=Non
     msg.set_content(body_text or "Please view this email in HTML format.")
     msg.add_alternative(html_body, subtype='html')
 
+    # Optional Redemption.jpg
     redemption_path = os.path.join('static', 'Redemption.jpg')
-    if os.path.exists(redemption_path) and os.path.basename(redemption_path).lower() != "emailbody.jpg":
+    if os.path.exists(redemption_path):
         with open(redemption_path, 'rb') as f:
-            msg.add_attachment(
-                f.read(),
-                maintype='image',
-                subtype='jpeg',
-                filename='Redemption.jpg'
-            )
+            msg.add_attachment(f.read(), maintype='image', subtype='jpeg', filename='Redemption.jpg')
 
+    # Attachment (card)
     if attachment_path and os.path.exists(attachment_path):
-        if os.path.basename(attachment_path).lower() != "emailbody.jpg":
-            with open(attachment_path, 'rb') as f:
-                mime_type, _ = mimetypes.guess_type(attachment_path)
-                maintype, subtype = mime_type.split('/') if mime_type else ('application', 'octet-stream')
-                msg.add_attachment(
-                    f.read(),
-                    maintype=maintype,
-                    subtype=subtype,
-                    filename=os.path.basename(attachment_path)
-                )
-        else:
-            logging.warning("Skipped attaching EmailBody.jpg explicitly.")
+        with open(attachment_path, 'rb') as f:
+            mime_type, _ = mimetypes.guess_type(attachment_path)
+            maintype, subtype = mime_type.split('/') if mime_type else ('application', 'octet-stream')
+            msg.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=os.path.basename(attachment_path))
 
     try:
         with smtplib.SMTP(smtp_server, smtp_port, timeout=10) as server:
             server.starttls()
             server.login(smtp_user, smtp_password)
             server.send_message(msg)
-            logging.info(f"Email sent to {to_email}")
+            logging.info(f"✅ Email sent to {to_email}")
     except Exception as e:
         logging.error(f"SMTP send failed: {e}")
 
@@ -170,15 +158,14 @@ def generate_cards_from_df(df, output_folder):
 
     for _, row in df.iterrows():
         name = str(row.get('Name', 'Unknown'))
-        Card = str(row.get('Card', 'Unknown')).strip()
+        card_val = str(row.get('Card', 'Unknown')).strip()
         date_val = row.get('Date', '')
+        date = ""
         if pd.notna(date_val):
             try:
                 date = pd.to_datetime(date_val).strftime("%Y-%m-%d")
             except Exception:
                 date = str(date_val)
-        else:
-            date = ""
         vip_status = str(row.get('VIP', 'no')).strip().lower()
         email = str(row.get('Email')) if pd.notna(row.get('Email')) else None
 
@@ -190,31 +177,20 @@ def generate_cards_from_df(df, output_folder):
             card = im.convert('RGB')
             draw = ImageDraw.Draw(card)
 
-            # Updated card display logic:
-            if Card.startswith("AL001"):
-                display_text = format_card_id(Card)
-            else:
-                m = re.match(r'^([A-Za-z]{3})(\d+)$', Card)
-                if m:
-                    display_text = f"{m.group(1)} {m.group(2)}"
-                else:
-                    display_text = Card
-
+            display_text = format_card_id(card_val)
             draw.text(POLICY_NO_POS, display_text, font=font_policy_no, fill=WHITE)
             draw.text(VALID_UNTIL_LABEL_POS, "VALID", font=font_label, fill=WHITE)
+
             bbox = draw.textbbox(VALID_UNTIL_LABEL_POS, "VALID", font=font_label)
-            draw.text(
-                (VALID_UNTIL_LABEL_POS[0], VALID_UNTIL_LABEL_POS[1] + bbox[3] - bbox[1] + 5),
-                f"UNTIL - {date}", font=font_date, fill=WHITE
-            )
+            draw.text((VALID_UNTIL_LABEL_POS[0], VALID_UNTIL_LABEL_POS[1] + bbox[3] - bbox[1] + 5),
+                      f"UNTIL - {date}", font=font_date, fill=WHITE)
             draw.text(NAME_POS, name, font=font_name, fill=WHITE)
 
-            filename = os.path.join(output_folder, f"{sanitize_filename(name)}_{sanitize_filename(Card)}.png")
+            filename = os.path.join(output_folder, f"{sanitize_filename(name)}_{sanitize_filename(card_val)}.png")
             card.save(filename, format='PNG')
 
             if email:
-                subject = f"Your A-Member Card Awaits You"
-                send_email_with_attachment(email, subject, "", filename)
+                send_email_with_attachment(email, "Your A-Member Card Awaits You", "", filename)
 
 
 def zip_folder(folder_path, zip_path):
@@ -227,17 +203,14 @@ def zip_folder(folder_path, zip_path):
 
 def clear_folders_periodically():
     while True:
+        time.sleep(43200)  # every 12h
         for folder in [UPLOAD_FOLDER, OUTPUT_FOLDER]:
-            for filename in os.listdir(folder):
-                file_path = os.path.join(folder, filename)
-                try:
-                    if os.path.isfile(file_path):
-                        os.unlink(file_path)
-                    elif os.path.isdir(file_path):
-                        shutil.rmtree(file_path)
-                except Exception as e:
-                    logging.error(f"Cleanup error: {e}")
-        time.sleep(43200)  # 12 hours
+            try:
+                shutil.rmtree(folder, ignore_errors=True)
+                os.makedirs(folder, exist_ok=True)
+                logging.info(f"🧹 Cleared {folder}")
+            except Exception as e:
+                logging.error(f"Cleanup error: {e}")
 
 
 if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
@@ -252,44 +225,43 @@ def index():
             flash('No file uploaded')
             return redirect(request.url)
 
-        if allowed_file(file.filename):
-            try:
-                shutil.rmtree(OUTPUT_FOLDER, ignore_errors=True)
-                os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+        if not allowed_file(file.filename):
+            flash('Unsupported file type. Please upload an XLSX file.')
+            return redirect(request.url)
 
-                filepath = os.path.join(UPLOAD_FOLDER, file.filename)
-                file.save(filepath)
+        try:
+            shutil.rmtree(OUTPUT_FOLDER, ignore_errors=True)
+            os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-                df = pd.read_excel(filepath, engine='openpyxl')
+            filepath = os.path.join(UPLOAD_FOLDER, file.filename)
+            file.save(filepath)
 
-                if df.shape[1] < 3:
-                    flash('File must have at least 3 columns')
-                    return redirect(request.url)
-
-                generate_cards_from_df(df, OUTPUT_FOLDER)
-
-                with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp_zip:
-                    zip_folder(OUTPUT_FOLDER, tmp_zip.name)
-                    zip_path = tmp_zip.name
-
-                @after_this_request
-                def remove_file(response):
-                    try:
-                        os.remove(zip_path)
-                        logging.info(f"🗑️ Deleted {zip_path}")
-                    except Exception as e:
-                        logging.error(f"Error deleting zip: {e}")
-                    return response
-
-                return send_file(zip_path, as_attachment=True, download_name='cards.zip')
-
-            except Exception as e:
-                logging.error(traceback.format_exc())
-                flash(f"Processing error: {e}")
+            df = pd.read_excel(filepath, engine='openpyxl')
+            if df.shape[1] < 3:
+                flash('File must have at least 3 columns')
                 return redirect(request.url)
 
-        flash('Unsupported file type. Please upload an XLSX file.')
-        return redirect(request.url)
+            generate_cards_from_df(df, OUTPUT_FOLDER)
+
+            with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp_zip:
+                zip_folder(OUTPUT_FOLDER, tmp_zip.name)
+                zip_path = tmp_zip.name
+
+            @after_this_request
+            def remove_file(response):
+                try:
+                    os.remove(zip_path)
+                    logging.info(f"🗑️ Deleted {zip_path}")
+                except Exception as e:
+                    logging.error(f"Error deleting zip: {e}")
+                return response
+
+            return send_file(zip_path, as_attachment=True, download_name='cards.zip')
+
+        except Exception:
+            logging.error(traceback.format_exc())
+            flash("Processing error. Check logs for details.")
+            return redirect(request.url)
 
     return render_template('index.html')
 
