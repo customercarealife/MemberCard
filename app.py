@@ -88,13 +88,13 @@ def format_card_id(card_id):
 
 
 def send_email_with_attachment(to_email, subject, body_text, attachment_path=None):
-    smtp_server = os.getenv('SMTP_SERVER')
+    smtp_server = os.getenv('SMTP_HOST')  # fixed
     smtp_port = int(os.getenv('SMTP_PORT', 587))
     smtp_user = os.getenv('SMTP_USER')
-    smtp_password = os.getenv('SMTP_PASSWORD')
+    smtp_password = os.getenv('SMTP_PASS')  # fixed
 
     if not smtp_server or not smtp_user or not smtp_password:
-        logging.error("SMTP credentials missing. Email not sent.")
+        logging.error("❌ SMTP credentials missing. Email not sent.")
         return
 
     image_url = "https://i.imghippo.com/files/shL3300Ww.jpg"
