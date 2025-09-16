@@ -1,0 +1,5 @@
+In app.py
+Line Number 131 Card Format Changed
+In line 172, changed from formatted_Card = Card_id(Card) to formatted_Card = format_card_id(Card)
+Changed font form ariel to Hopone
+Modified line 175 to 181

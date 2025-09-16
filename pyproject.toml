@@ -1,0 +1,16 @@
+[project]
+name = "card-generator-app"
+version = "0.1.0"
+description = "Flask app that generates ID cards from Excel/CSV files."
+authors = [{ name = "Your Name", email = "your@email.com" }]
+requires-python = ">=3.10,<3.12"
+dependencies = [
+    "Flask>=2.3",
+    "pandas>=2.2.2",
+    "openpyxl>=3.1.2",
+    "Pillow>=10.3"
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
