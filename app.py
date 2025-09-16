@@ -14,9 +14,12 @@ from flask import Flask, render_template, request, redirect, flash, send_file, a
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 from dotenv import load_dotenv
-load_dotenv()
 
+load_dotenv()
 logging.basicConfig(level=logging.INFO)
+logging.info(f"SMTP_SERVER={os.getenv('SMTP_SERVER')}")
+logging.info(f"SMTP_USER={os.getenv('SMTP_USER')}")
+logging.info(f"SMTP_PASSWORD={'SET' if os.getenv('SMTP_PASSWORD') else 'NOT SET'}")
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'supersecretkey')
