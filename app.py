@@ -13,13 +13,12 @@ from email.message import EmailMessage
 from flask import Flask, render_template, request, redirect, flash, send_file, after_this_request
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
-from dotenv import load_dotenv
 
-load_dotenv()
+# Load environment variables from .env
+from dotenv import load_dotenv
+load_dotenv()  # ensures .env variables are loaded
+
 logging.basicConfig(level=logging.INFO)
-logging.info(f"SMTP_SERVER={os.getenv('SMTP_SERVER')}")
-logging.info(f"SMTP_USER={os.getenv('SMTP_USER')}")
-logging.info(f"SMTP_PASSWORD={'SET' if os.getenv('SMTP_PASSWORD') else 'NOT SET'}")
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'supersecretkey')
@@ -44,7 +43,7 @@ FONT_SIZE_LABEL = 18
 for folder in (UPLOAD_FOLDER, OUTPUT_FOLDER, 'static'):
     os.makedirs(folder, exist_ok=True)
 
-# Create sample XLSX file if missing
+# Create sample XLSX if missing
 if not os.path.exists(SAMPLE_XLSX_PATH):
     df_sample = pd.DataFrame({
         "Name": ["John Doe", "Jane Smith"],
@@ -93,10 +92,10 @@ def format_card_id(card_id):
 
 
 def send_email_with_attachment(to_email, subject, body_text, attachment_path=None):
-    smtp_server = os.getenv('SMTP_HOST')  # fixed
+    smtp_server = os.getenv('SMTP_SERVER')
     smtp_port = int(os.getenv('SMTP_PORT', 587))
     smtp_user = os.getenv('SMTP_USER')
-    smtp_password = os.getenv('SMTP_PASS')  # fixed
+    smtp_password = os.getenv('SMTP_PASSWORD')
 
     if not smtp_server or not smtp_user or not smtp_password:
         logging.error("❌ SMTP credentials missing. Email not sent.")
@@ -132,13 +131,11 @@ def send_email_with_attachment(to_email, subject, body_text, attachment_path=Non
     msg.set_content(body_text or "Please view this email in HTML format.")
     msg.add_alternative(html_body, subtype='html')
 
-    # Optional Redemption.jpg
     redemption_path = os.path.join('static', 'Redemption.jpg')
     if os.path.exists(redemption_path):
         with open(redemption_path, 'rb') as f:
             msg.add_attachment(f.read(), maintype='image', subtype='jpeg', filename='Redemption.jpg')
 
-    # Attachment (card)
     if attachment_path and os.path.exists(attachment_path):
         with open(attachment_path, 'rb') as f:
             mime_type, _ = mimetypes.guess_type(attachment_path)
@@ -299,6 +296,11 @@ def serve_redemption():
 
 
 if __name__ == '__main__':
+    # Debug SMTP credentials detection
+    logging.info(f"SMTP_SERVER: {os.getenv('SMTP_SERVER')}")
+    logging.info(f"SMTP_USER: {os.getenv('SMTP_USER')}")
+    logging.info(f"SMTP_PORT: {os.getenv('SMTP_PORT')}")
+    
     port = int(os.environ.get('PORT', 5003))
     logging.info(f"🚀 Starting Flask app on port {port}")
     app.run(host='0.0.0.0', port=port, threaded=True)
