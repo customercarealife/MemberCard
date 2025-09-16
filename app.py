@@ -13,10 +13,6 @@ from email.message import EmailMessage
 from flask import Flask, render_template, request, redirect, flash, send_file, after_this_request
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
-from dotenv import load_dotenv
-
-# Load environment variables from .env file
-load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 
@@ -96,16 +92,10 @@ def format_card_id(card_id):
 
 
 def send_email_with_attachment(to_email, subject, body_text, attachment_path=None):
-    # Check if SMTP credentials are available
     smtp_server = os.environ.get('SMTP_SERVER')
+    smtp_port = int(os.environ.get('SMTP_PORT', 587))
     smtp_user = os.environ.get('SMTP_USER')
     smtp_password = os.environ.get('SMTP_PASSWORD')
-    
-    if not all([smtp_server, smtp_user, smtp_password]):
-        logging.warning("SMTP credentials not configured. Email sending is disabled.")
-        return False
-    
-    smtp_port = int(os.environ.get('SMTP_PORT', 587))
 
     image_url = "https://i.imghippo.com/files/shL3300Ww.jpg"
 
@@ -168,10 +158,8 @@ def send_email_with_attachment(to_email, subject, body_text, attachment_path=Non
             server.login(smtp_user, smtp_password)
             server.send_message(msg)
             logging.info(f"Email sent to {to_email}")
-            return True
     except Exception as e:
         logging.error(f"SMTP send failed: {e}")
-        return False
 
 
 def generate_cards_from_df(df, output_folder):
