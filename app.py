@@ -6,17 +6,15 @@ import re
 import threading
 import time
 import logging
-import smtplib
 import mimetypes
-import traceback
 from email.message import EmailMessage
 from flask import Flask, render_template, request, redirect, flash, send_file, after_this_request
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
-
-# Load environment variables from .env
 from dotenv import load_dotenv
-load_dotenv()  # ensures .env variables are loaded
+
+# Load .env
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 
@@ -39,11 +37,13 @@ FONT_SIZE_DATE = 22
 FONT_SIZE_NAME = 25
 FONT_SIZE_LABEL = 18
 
+SEND_EMAILS = os.getenv("SEND_EMAILS", "false").lower() == "true"
+
 # Ensure folders exist
 for folder in (UPLOAD_FOLDER, OUTPUT_FOLDER, 'static'):
     os.makedirs(folder, exist_ok=True)
 
-# Create sample XLSX if missing
+# Sample XLSX
 if not os.path.exists(SAMPLE_XLSX_PATH):
     df_sample = pd.DataFrame({
         "Name": ["John Doe", "Jane Smith"],
@@ -92,50 +92,28 @@ def format_card_id(card_id):
 
 
 def send_email_with_attachment(to_email, subject, body_text, attachment_path=None):
+    if not SEND_EMAILS:
+        logging.info(f"Skipping email to {to_email} (SEND_EMAILS=false)")
+        return
+
+    import smtplib
+
     smtp_server = os.getenv('SMTP_SERVER')
     smtp_port = int(os.getenv('SMTP_PORT', 587))
     smtp_user = os.getenv('SMTP_USER')
     smtp_password = os.getenv('SMTP_PASSWORD')
 
     if not smtp_server or not smtp_user or not smtp_password:
-        logging.error("❌ SMTP credentials missing. Email not sent.")
+        logging.error("SMTP credentials missing. Email not sent.")
         return
-
-    image_url = "https://i.imghippo.com/files/shL3300Ww.jpg"
-    contact_info = """
-       <div style='text-align:left;'><br>
-           Warm Regards,<br>
-           Customer Care & Complaints Management<br>
-           Operation Department<br><br>
-           Phone: +95 9791233333<br>
-           Email: customercare@alife.com.mm<br><br>
-           A Life Insurance Company Limited<br>
-           3rd Floor (A), No. (108), Corner of<br>
-           Kabaraye Pagoda Road and Nat Mauk Road,<br>
-           Bo Cho (1) Quarter, Bahan Township, Yangon, Myanmar 12201<br>
-       </div>"""
-
-    html_body = f"""
-       <html>
-           <body>
-               <img src="{image_url}" style="max-width:100%;" alt="Header"><br>
-               <p>{body_text}</p>
-               {contact_info}
-           </body>
-       </html>"""
 
     msg = EmailMessage()
     msg['Subject'] = subject
     msg['From'] = smtp_user
     msg['To'] = to_email
     msg.set_content(body_text or "Please view this email in HTML format.")
-    msg.add_alternative(html_body, subtype='html')
 
-    redemption_path = os.path.join('static', 'Redemption.jpg')
-    if os.path.exists(redemption_path):
-        with open(redemption_path, 'rb') as f:
-            msg.add_attachment(f.read(), maintype='image', subtype='jpeg', filename='Redemption.jpg')
-
+    # Attach image if provided
     if attachment_path and os.path.exists(attachment_path):
         with open(attachment_path, 'rb') as f:
             mime_type, _ = mimetypes.guess_type(attachment_path)
@@ -168,6 +146,7 @@ def generate_cards_from_df(df, output_folder):
                 date = pd.to_datetime(date_val).strftime("%Y-%m-%d")
             except Exception:
                 date = str(date_val)
+
         vip_status = str(row.get('VIP', 'no')).strip().lower()
         email = str(row.get('Email')) if pd.notna(row.get('Email')) else None
 
@@ -178,11 +157,10 @@ def generate_cards_from_df(df, output_folder):
         with Image.open(template_img) as im:
             card = im.convert('RGB')
             draw = ImageDraw.Draw(card)
-
             display_text = format_card_id(card_val)
+
             draw.text(POLICY_NO_POS, display_text, font=font_policy_no, fill=WHITE)
             draw.text(VALID_UNTIL_LABEL_POS, "VALID", font=font_label, fill=WHITE)
-
             bbox = draw.textbbox(VALID_UNTIL_LABEL_POS, "VALID", font=font_label)
             draw.text((VALID_UNTIL_LABEL_POS[0], VALID_UNTIL_LABEL_POS[1] + bbox[3] - bbox[1] + 5),
                       f"UNTIL - {date}", font=font_date, fill=WHITE)
@@ -205,7 +183,7 @@ def zip_folder(folder_path, zip_path):
 
 def clear_folders_periodically():
     while True:
-        time.sleep(43200)  # every 12h
+        time.sleep(43200)
         for folder in [UPLOAD_FOLDER, OUTPUT_FOLDER]:
             try:
                 shutil.rmtree(folder, ignore_errors=True)
@@ -253,15 +231,14 @@ def index():
             def remove_file(response):
                 try:
                     os.remove(zip_path)
-                    logging.info(f"🗑️ Deleted {zip_path}")
                 except Exception as e:
                     logging.error(f"Error deleting zip: {e}")
                 return response
 
             return send_file(zip_path, as_attachment=True, download_name='cards.zip')
 
-        except Exception:
-            logging.error(traceback.format_exc())
+        except Exception as e:
+            logging.error(f"Processing error: {e}")
             flash("Processing error. Check logs for details.")
             return redirect(request.url)
 
@@ -296,11 +273,6 @@ def serve_redemption():
 
 
 if __name__ == '__main__':
-    # Debug SMTP credentials detection
-    logging.info(f"SMTP_SERVER: {os.getenv('SMTP_SERVER')}")
-    logging.info(f"SMTP_USER: {os.getenv('SMTP_USER')}")
-    logging.info(f"SMTP_PORT: {os.getenv('SMTP_PORT')}")
-    
     port = int(os.environ.get('PORT', 5003))
     logging.info(f"🚀 Starting Flask app on port {port}")
     app.run(host='0.0.0.0', port=port, threaded=True)
