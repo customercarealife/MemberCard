@@ -13,6 +13,8 @@ from email.message import EmailMessage
 from flask import Flask, render_template, request, redirect, flash, send_file, after_this_request
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
+from dotenv import load_dotenv
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 
