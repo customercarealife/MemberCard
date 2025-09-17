@@ -13,6 +13,8 @@ from email.message import EmailMessage
 from flask import Flask, render_template, request, redirect, flash, send_file, after_this_request
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
+import socket
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logging.basicConfig(level=logging.INFO)
 
@@ -34,6 +36,10 @@ FONT_SIZE_POLICY_NO = 36
 FONT_SIZE_DATE = 22
 FONT_SIZE_NAME = 25
 FONT_SIZE_LABEL = 18
+
+# Email sending configuration
+EMAIL_TIMEOUT = 30  # seconds
+MAX_EMAIL_WORKERS = 2  # Limit concurrent email sends
 
 # Ensure necessary folders exist
 for folder in (UPLOAD_FOLDER, OUTPUT_FOLDER, 'static'):
@@ -97,6 +103,10 @@ def send_email_with_attachment(to_email, subject, body_text, attachment_path=Non
     smtp_user = os.environ.get('SMTP_USER')
     smtp_password = os.environ.get('SMTP_PASSWORD')
 
+    if not all([smtp_server, smtp_user, smtp_password]):
+        logging.error("SMTP configuration missing")
+        return False
+
     image_url = "https://i.imghippo.com/files/shL3300Ww.jpg"
 
     contact_info = """<div style='text-align:left;'><br>
@@ -153,16 +163,35 @@ def send_email_with_attachment(to_email, subject, body_text, attachment_path=Non
             logging.warning("Skipped attaching EmailBody.jpg explicitly.")
 
     try:
-        with smtplib.SMTP(smtp_server, smtp_port, timeout=10) as server:
-            server.ehlo()              # Identify to the server
-            server.starttls()          # Start TLS
-            server.ehlo()              # Re-identify after TLS
-            server.login(smtp_user, smtp_password)
-            server.send_message(msg)
-
-            logging.info(f"Email sent to {to_email}")
+        # Set socket timeout
+        socket.setdefaulttimeout(EMAIL_TIMEOUT)
+        
+        # Create SMTP connection with timeout
+        server = smtplib.SMTP(smtp_server, smtp_port, timeout=EMAIL_TIMEOUT)
+        server.ehlo()
+        server.starttls()
+        server.ehlo()
+        server.login(smtp_user, smtp_password)
+        server.send_message(msg)
+        server.quit()
+        
+        logging.info(f"Email sent to {to_email}")
+        return True
+        
+    except smtplib.SMTPException as e:
+        logging.error(f"SMTP error sending email to {to_email}: {e}")
+    except socket.timeout:
+        logging.error(f"Timeout sending email to {to_email}")
     except Exception as e:
-        logging.error(f"SMTP send failed: {e}")
+        logging.error(f"Unexpected error sending email to {to_email}: {e}")
+    
+    # Ensure connection is closed in case of error
+    try:
+        server.quit()
+    except:
+        pass
+        
+    return False
 
 
 def generate_cards_from_df(df, output_folder):
@@ -170,6 +199,9 @@ def generate_cards_from_df(df, output_folder):
     font_policy_no = load_font(FONT_PATH, FONT_SIZE_POLICY_NO)
     font_date = load_font(FONT_PATH, FONT_SIZE_DATE)
     font_name = load_font(FONT_PATH, FONT_SIZE_NAME)
+
+    # Collect email tasks to process them in a separate thread pool
+    email_tasks = []
 
     for _, row in df.iterrows():
         name = str(row.get('Name', 'Unknown'))
@@ -217,7 +249,27 @@ def generate_cards_from_df(df, output_folder):
 
             if email:
                 subject = f"Your A-Member Card Awaits You"
-                send_email_with_attachment(email, subject, "", filename)
+                email_tasks.append((email, subject, filename))
+
+    # Process email tasks in a separate thread pool to avoid blocking the main request
+    if email_tasks:
+        def send_emails_async():
+            with ThreadPoolExecutor(max_workers=MAX_EMAIL_WORKERS) as executor:
+                futures = []
+                for email, subject, filename in email_tasks:
+                    futures.append(executor.submit(send_email_with_attachment, email, subject, "", filename))
+                
+                # Wait for all tasks to complete but don't block the main response
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception as e:
+                        logging.error(f"Error in email task: {e}")
+        
+        # Start email sending in background thread
+        email_thread = threading.Thread(target=send_emails_async)
+        email_thread.daemon = True
+        email_thread.start()
 
 
 def zip_folder(folder_path, zip_path):
