@@ -1,3 +1,7 @@
+ERROR:root:SMTP send failed: please run connect() first
+ERROR:root:SMTP send failed: please run connect() first
+
+
 import os
 import shutil
 import zipfile
@@ -97,10 +101,6 @@ def send_email_with_attachment(to_email, subject, body_text, attachment_path=Non
     smtp_user = os.environ.get('SMTP_USER')
     smtp_password = os.environ.get('SMTP_PASSWORD')
 
-    if not all([smtp_server, smtp_user, smtp_password]):
-        logging.error("SMTP configuration missing")
-        return
-
     image_url = "https://i.imghippo.com/files/shL3300Ww.jpg"
 
     contact_info = """<div style='text-align:left;'><br>
@@ -157,23 +157,16 @@ def send_email_with_attachment(to_email, subject, body_text, attachment_path=Non
             logging.warning("Skipped attaching EmailBody.jpg explicitly.")
 
     try:
-        # Fixed: Don't use context manager if you need to manually control the connection
-        server = smtplib.SMTP(smtp_server, smtp_port, timeout=10)
-        server.ehlo()              # Identify to the server
-        server.starttls()          # Start TLS
-        server.ehlo()              # Re-identify after TLS
-        server.login(smtp_user, smtp_password)
-        server.send_message(msg)
-        server.quit()  # Properly close the connection
-        
-        logging.info(f"Email sent to {to_email}")
+        with smtplib.SMTP(smtp_server, smtp_port, timeout=10) as server:
+            server.ehlo()              # Identify to the server
+            server.starttls()          # Start TLS
+            server.ehlo()              # Re-identify after TLS
+            server.login(smtp_user, smtp_password)
+            server.send_message(msg)
+
+            logging.info(f"Email sent to {to_email}")
     except Exception as e:
         logging.error(f"SMTP send failed: {e}")
-        # Make sure to close the connection if it was opened
-        try:
-            server.quit()
-        except:
-            pass
 
 
 def generate_cards_from_df(df, output_folder):
