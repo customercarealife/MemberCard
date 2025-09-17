@@ -1,7 +1,3 @@
-ERROR:root:SMTP send failed: please run connect() first
-ERROR:root:SMTP send failed: please run connect() first
-
-
 import os
 import shutil
 import zipfile
