@@ -15,6 +15,7 @@ import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import queue
 
 logging.basicConfig(level=logging.INFO)
 
@@ -39,7 +40,10 @@ FONT_SIZE_LABEL = 18
 
 # Email sending configuration
 EMAIL_TIMEOUT = 30  # seconds
-MAX_EMAIL_WORKERS = 2  # Limit concurrent email sends
+
+# Global email queue and worker thread
+email_queue = queue.Queue()
+email_worker_running = True
 
 # Ensure necessary folders exist
 for folder in (UPLOAD_FOLDER, OUTPUT_FOLDER, 'static'):
@@ -169,8 +173,9 @@ def send_email_with_attachment(to_email, subject, body_text, attachment_path=Non
         # Create SMTP connection with timeout
         server = smtplib.SMTP(smtp_server, smtp_port, timeout=EMAIL_TIMEOUT)
         server.ehlo()
-        server.starttls()
-        server.ehlo()
+        if smtp_port == 587:  # Only start TLS for port 587
+            server.starttls()
+            server.ehlo()
         server.login(smtp_user, smtp_password)
         server.send_message(msg)
         server.quit()
@@ -184,6 +189,7 @@ def send_email_with_attachment(to_email, subject, body_text, attachment_path=Non
         logging.error(f"Timeout sending email to {to_email}")
     except Exception as e:
         logging.error(f"Unexpected error sending email to {to_email}: {e}")
+        logging.error(traceback.format_exc())
     
     # Ensure connection is closed in case of error
     try:
@@ -194,14 +200,32 @@ def send_email_with_attachment(to_email, subject, body_text, attachment_path=Non
     return False
 
 
+def email_worker():
+    """Background worker that processes email queue"""
+    while email_worker_running:
+        try:
+            # Get email task from queue with timeout
+            task = email_queue.get(timeout=1)
+            if task is None:  # Sentinel value to stop worker
+                break
+                
+            email, subject, filename = task
+            logging.info(f"Processing email to {email}")
+            send_email_with_attachment(email, subject, "", filename)
+            email_queue.task_done()
+            
+        except queue.Empty:
+            continue
+        except Exception as e:
+            logging.error(f"Error in email worker: {e}")
+            logging.error(traceback.format_exc())
+
+
 def generate_cards_from_df(df, output_folder):
     font_label = load_font(FONT_PATH, FONT_SIZE_LABEL)
     font_policy_no = load_font(FONT_PATH, FONT_SIZE_POLICY_NO)
     font_date = load_font(FONT_PATH, FONT_SIZE_DATE)
     font_name = load_font(FONT_PATH, FONT_SIZE_NAME)
-
-    # Collect email tasks to process them in a separate thread pool
-    email_tasks = []
 
     for _, row in df.iterrows():
         name = str(row.get('Name', 'Unknown'))
@@ -249,27 +273,9 @@ def generate_cards_from_df(df, output_folder):
 
             if email:
                 subject = f"Your A-Member Card Awaits You"
-                email_tasks.append((email, subject, filename))
-
-    # Process email tasks in a separate thread pool to avoid blocking the main request
-    if email_tasks:
-        def send_emails_async():
-            with ThreadPoolExecutor(max_workers=MAX_EMAIL_WORKERS) as executor:
-                futures = []
-                for email, subject, filename in email_tasks:
-                    futures.append(executor.submit(send_email_with_attachment, email, subject, "", filename))
-                
-                # Wait for all tasks to complete but don't block the main response
-                for future in as_completed(futures):
-                    try:
-                        future.result()
-                    except Exception as e:
-                        logging.error(f"Error in email task: {e}")
-        
-        # Start email sending in background thread
-        email_thread = threading.Thread(target=send_emails_async)
-        email_thread.daemon = True
-        email_thread.start()
+                # Add email task to queue
+                email_queue.put((email, subject, filename))
+                logging.info(f"Added email task for {email} to queue")
 
 
 def zip_folder(folder_path, zip_path):
@@ -295,6 +301,12 @@ def clear_folders_periodically():
         time.sleep(43200)  # 12 hours
 
 
+# Start email worker thread
+email_thread = threading.Thread(target=email_worker)
+email_thread.daemon = True
+email_thread.start()
+
+# Start cleanup thread
 if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
     threading.Thread(target=clear_folders_periodically, daemon=True).start()
 
@@ -336,6 +348,7 @@ def index():
                         logging.error(f"Error deleting zip: {e}")
                     return response
 
+                flash('Cards generated successfully! Emails are being sent in the background.')
                 return send_file(zip_path, as_attachment=True, download_name='cards.zip')
 
             except Exception as e:
@@ -374,6 +387,29 @@ def api_create_card():
 @app.route('/static/Redemption.jpg')
 def serve_redemption():
     return send_file('static/Redemption.jpg', mimetype='image/jpeg')
+
+
+@app.route('/email_status')
+def email_status():
+    """Endpoint to check email queue status"""
+    return {
+        'queue_size': email_queue.qsize(),
+        'worker_alive': email_thread.is_alive()
+    }
+
+
+# Cleanup when app shuts down
+import atexit
+
+@atexit.register
+def shutdown_email_worker():
+    global email_worker_running
+    email_worker_running = False
+    # Add sentinel to wake up worker
+    try:
+        email_queue.put(None, timeout=1)
+    except:
+        pass
 
 
 if __name__ == '__main__':
