@@ -10,12 +10,12 @@ import smtplib
 import mimetypes
 import traceback
 from email.message import EmailMessage
-from flask import Flask, render_template, request, redirect, flash, send_file, after_this_request
+from flask import Flask, render_template, request, redirect, flash, send_file, after_this_request, jsonify
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 import socket
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import queue
+import json
+from datetime import datetime
 
 logging.basicConfig(level=logging.INFO)
 
@@ -39,11 +39,18 @@ FONT_SIZE_NAME = 25
 FONT_SIZE_LABEL = 18
 
 # Email sending configuration
-EMAIL_TIMEOUT = 30  # seconds
+EMAIL_TIMEOUT = 15  # Reduced timeout
+BATCH_SIZE = 5  # Send emails in batches
+SMTP_CONNECTION_TIMEOUT = 300  # 5 minutes to keep connection alive
 
-# Global email queue and worker thread
-email_queue = queue.Queue()
-email_worker_running = True
+# Store email progress
+email_progress = {
+    'total': 0,
+    'sent': 0,
+    'failed': 0,
+    'status': 'idle',
+    'last_update': None
+}
 
 # Ensure necessary folders exist
 for folder in (UPLOAD_FOLDER, OUTPUT_FOLDER, 'static'):
@@ -101,16 +108,104 @@ def format_card_id(card_id):
         return f"{chars}-{numbers[:4]} {numbers[4:8]} {numbers[8:11]}"
 
 
-def send_email_with_attachment(to_email, subject, body_text, attachment_path=None):
-    smtp_server = os.environ.get('SMTP_SERVER')
-    smtp_port = int(os.environ.get('SMTP_PORT', 587))
+class SMTPConnectionPool:
+    """Connection pool for SMTP to reuse connections"""
+    def __init__(self):
+        self.connections = {}
+        self.lock = threading.Lock()
+        
+    def get_connection(self):
+        """Get or create an SMTP connection"""
+        thread_id = threading.get_ident()
+        
+        with self.lock:
+            if thread_id in self.connections:
+                conn, last_used = self.connections[thread_id]
+                # Reuse connection if it's still fresh
+                if time.time() - last_used < SMTP_CONNECTION_TIMEOUT:
+                    self.connections[thread_id] = (conn, time.time())
+                    return conn
+            
+            # Create new connection
+            smtp_server = os.environ.get('SMTP_SERVER')
+            smtp_port = int(os.environ.get('SMTP_PORT', 587))
+            smtp_user = os.environ.get('SMTP_USER')
+            smtp_password = os.environ.get('SMTP_PASSWORD')
+            
+            if not all([smtp_server, smtp_user, smtp_password]):
+                raise Exception("SMTP configuration missing")
+            
+            try:
+                socket.setdefaulttimeout(EMAIL_TIMEOUT)
+                server = smtplib.SMTP(smtp_server, smtp_port, timeout=EMAIL_TIMEOUT)
+                server.ehlo()
+                if smtp_port == 587:
+                    server.starttls()
+                    server.ehlo()
+                server.login(smtp_user, smtp_password)
+                
+                self.connections[thread_id] = (server, time.time())
+                return server
+                
+            except Exception as e:
+                logging.error(f"Failed to create SMTP connection: {e}")
+                raise
+    
+    def cleanup_old_connections(self):
+        """Clean up old connections"""
+        with self.lock:
+            current_time = time.time()
+            to_remove = []
+            
+            for thread_id, (conn, last_used) in self.connections.items():
+                if current_time - last_used > SMTP_CONNECTION_TIMEOUT:
+                    try:
+                        conn.quit()
+                    except:
+                        pass
+                    to_remove.append(thread_id)
+            
+            for thread_id in to_remove:
+                del self.connections[thread_id]
+
+
+# Global connection pool
+smtp_pool = SMTPConnectionPool()
+
+
+def send_email_batch(emails_data):
+    """Send a batch of emails using a single connection"""
+    global email_progress
+    
+    try:
+        server = smtp_pool.get_connection()
+        sent_count = 0
+        
+        for email_data in emails_data:
+            to_email, subject, body_text, attachment_path = email_data
+            
+            try:
+                msg = create_email_message(to_email, subject, body_text, attachment_path)
+                server.send_message(msg)
+                sent_count += 1
+                email_progress['sent'] += 1
+                email_progress['last_update'] = datetime.now().isoformat()
+                logging.info(f"Email sent to {to_email}")
+                
+            except Exception as e:
+                email_progress['failed'] += 1
+                logging.error(f"Failed to send email to {to_email}: {e}")
+                
+        return sent_count
+        
+    except Exception as e:
+        logging.error(f"Failed to send email batch: {e}")
+        return 0
+
+
+def create_email_message(to_email, subject, body_text, attachment_path=None):
+    """Create email message without sending"""
     smtp_user = os.environ.get('SMTP_USER')
-    smtp_password = os.environ.get('SMTP_PASSWORD')
-
-    if not all([smtp_server, smtp_user, smtp_password]):
-        logging.error("SMTP configuration missing")
-        return False
-
     image_url = "https://i.imghippo.com/files/shL3300Ww.jpg"
 
     contact_info = """<div style='text-align:left;'><br>
@@ -142,8 +237,9 @@ def send_email_with_attachment(to_email, subject, body_text, attachment_path=Non
     msg.set_content(body_text or "Please view this email in HTML format.")
     msg.add_alternative(html_body, subtype='html')
 
+    # Attach redemption image
     redemption_path = os.path.join('static', 'Redemption.jpg')
-    if os.path.exists(redemption_path) and os.path.basename(redemption_path).lower() != "emailbody.jpg":
+    if os.path.exists(redemption_path):
         with open(redemption_path, 'rb') as f:
             msg.add_attachment(
                 f.read(),
@@ -152,80 +248,57 @@ def send_email_with_attachment(to_email, subject, body_text, attachment_path=Non
                 filename='Redemption.jpg'
             )
 
+    # Attach card image
     if attachment_path and os.path.exists(attachment_path):
-        if os.path.basename(attachment_path).lower() != "emailbody.jpg":
-            with open(attachment_path, 'rb') as f:
-                mime_type, _ = mimetypes.guess_type(attachment_path)
-                maintype, subtype = mime_type.split('/') if mime_type else ('application', 'octet-stream')
-                msg.add_attachment(
-                    f.read(),
-                    maintype=maintype,
-                    subtype=subtype,
-                    filename=os.path.basename(attachment_path)
-                )
-        else:
-            logging.warning("Skipped attaching EmailBody.jpg explicitly.")
+        with open(attachment_path, 'rb') as f:
+            msg.add_attachment(
+                f.read(),
+                maintype='image',
+                subtype='png',
+                filename=os.path.basename(attachment_path)
+            )
 
-    try:
-        # Set socket timeout
-        socket.setdefaulttimeout(EMAIL_TIMEOUT)
-        
-        # Create SMTP connection with timeout
-        server = smtplib.SMTP(smtp_server, smtp_port, timeout=EMAIL_TIMEOUT)
-        server.ehlo()
-        if smtp_port == 587:  # Only start TLS for port 587
-            server.starttls()
-            server.ehlo()
-        server.login(smtp_user, smtp_password)
-        server.send_message(msg)
-        server.quit()
-        
-        logging.info(f"Email sent to {to_email}")
-        return True
-        
-    except smtplib.SMTPException as e:
-        logging.error(f"SMTP error sending email to {to_email}: {e}")
-    except socket.timeout:
-        logging.error(f"Timeout sending email to {to_email}")
-    except Exception as e:
-        logging.error(f"Unexpected error sending email to {to_email}: {e}")
-        logging.error(traceback.format_exc())
+    return msg
+
+
+def send_emails_async(email_tasks):
+    """Send emails asynchronously in batches"""
+    global email_progress
     
-    # Ensure connection is closed in case of error
+    email_progress = {
+        'total': len(email_tasks),
+        'sent': 0,
+        'failed': 0,
+        'status': 'sending',
+        'last_update': datetime.now().isoformat()
+    }
+    
     try:
-        server.quit()
-    except:
-        pass
-        
-    return False
-
-
-def email_worker():
-    """Background worker that processes email queue"""
-    while email_worker_running:
-        try:
-            # Get email task from queue with timeout
-            task = email_queue.get(timeout=1)
-            if task is None:  # Sentinel value to stop worker
-                break
-                
-            email, subject, filename = task
-            logging.info(f"Processing email to {email}")
-            send_email_with_attachment(email, subject, "", filename)
-            email_queue.task_done()
+        # Process in batches
+        for i in range(0, len(email_tasks), BATCH_SIZE):
+            batch = email_tasks[i:i + BATCH_SIZE]
+            send_email_batch(batch)
+            time.sleep(1)  # Small delay between batches
             
-        except queue.Empty:
-            continue
-        except Exception as e:
-            logging.error(f"Error in email worker: {e}")
-            logging.error(traceback.format_exc())
+        email_progress['status'] = 'completed'
+        
+    except Exception as e:
+        email_progress['status'] = 'failed'
+        logging.error(f"Email sending failed: {e}")
+    
+    finally:
+        # Clean up connections
+        smtp_pool.cleanup_old_connections()
+        email_progress['last_update'] = datetime.now().isoformat()
 
 
-def generate_cards_from_df(df, output_folder):
+def generate_cards_from_df(df, output_folder, send_emails=True):
     font_label = load_font(FONT_PATH, FONT_SIZE_LABEL)
     font_policy_no = load_font(FONT_PATH, FONT_SIZE_POLICY_NO)
     font_date = load_font(FONT_PATH, FONT_SIZE_DATE)
     font_name = load_font(FONT_PATH, FONT_SIZE_NAME)
+
+    email_tasks = []
 
     for _, row in df.iterrows():
         name = str(row.get('Name', 'Unknown'))
@@ -249,7 +322,6 @@ def generate_cards_from_df(df, output_folder):
             card = im.convert('RGB')
             draw = ImageDraw.Draw(card)
 
-            # Updated card display logic:
             if Card.startswith("AL001"):
                 display_text = format_card_id(Card)
             else:
@@ -271,11 +343,11 @@ def generate_cards_from_df(df, output_folder):
             filename = os.path.join(output_folder, f"{sanitize_filename(name)}_{sanitize_filename(Card)}.png")
             card.save(filename, format='PNG')
 
-            if email:
+            if email and send_emails:
                 subject = f"Your A-Member Card Awaits You"
-                # Add email task to queue
-                email_queue.put((email, subject, filename))
-                logging.info(f"Added email task for {email} to queue")
+                email_tasks.append((email, subject, "", filename))
+
+    return email_tasks
 
 
 def zip_folder(folder_path, zip_path):
@@ -301,11 +373,6 @@ def clear_folders_periodically():
         time.sleep(43200)  # 12 hours
 
 
-# Start email worker thread
-email_thread = threading.Thread(target=email_worker)
-email_thread.daemon = True
-email_thread.start()
-
 # Start cleanup thread
 if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
     threading.Thread(target=clear_folders_periodically, daemon=True).start()
@@ -321,6 +388,8 @@ def index():
 
         if allowed_file(file.filename):
             try:
+                send_emails = request.form.get('send_emails', 'no') == 'yes'
+                
                 shutil.rmtree(OUTPUT_FOLDER, ignore_errors=True)
                 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
@@ -333,7 +402,7 @@ def index():
                     flash('File must have at least 3 columns')
                     return redirect(request.url)
 
-                generate_cards_from_df(df, OUTPUT_FOLDER)
+                email_tasks = generate_cards_from_df(df, OUTPUT_FOLDER, send_emails)
 
                 with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp_zip:
                     zip_folder(OUTPUT_FOLDER, tmp_zip.name)
@@ -348,7 +417,13 @@ def index():
                         logging.error(f"Error deleting zip: {e}")
                     return response
 
-                flash('Cards generated successfully! Emails are being sent in the background.')
+                # Start email sending in background if requested
+                if send_emails and email_tasks:
+                    threading.Thread(target=send_emails_async, args=(email_tasks,), daemon=True).start()
+                    flash(f'Cards generated successfully! Sending {len(email_tasks)} emails in the background.')
+                else:
+                    flash('Cards generated successfully!')
+
                 return send_file(zip_path, as_attachment=True, download_name='cards.zip')
 
             except Exception as e:
@@ -377,7 +452,7 @@ def api_create_card():
 
     df = pd.DataFrame([[data['Name'], data['Card'], data['Date']]], columns=['Name', 'Card', 'Date'])
     output_folder = tempfile.mkdtemp()
-    generate_cards_from_df(df, output_folder)
+    generate_cards_from_df(df, output_folder, send_emails=False)
     card_file = next((os.path.join(output_folder, f) for f in os.listdir(output_folder) if f.endswith('.png')), None)
     if not card_file:
         return {"error": "Card image not generated"}, 500
@@ -389,27 +464,10 @@ def serve_redemption():
     return send_file('static/Redemption.jpg', mimetype='image/jpeg')
 
 
-@app.route('/email_status')
-def email_status():
-    """Endpoint to check email queue status"""
-    return {
-        'queue_size': email_queue.qsize(),
-        'worker_alive': email_thread.is_alive()
-    }
-
-
-# Cleanup when app shuts down
-import atexit
-
-@atexit.register
-def shutdown_email_worker():
-    global email_worker_running
-    email_worker_running = False
-    # Add sentinel to wake up worker
-    try:
-        email_queue.put(None, timeout=1)
-    except:
-        pass
+@app.route('/email_progress')
+def get_email_progress():
+    """Get email sending progress"""
+    return jsonify(email_progress)
 
 
 if __name__ == '__main__':
